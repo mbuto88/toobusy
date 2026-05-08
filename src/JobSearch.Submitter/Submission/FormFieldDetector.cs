@@ -18,10 +18,14 @@ public class FormFieldDetector
         for (var i = 0; i < count; i++)
         {
             var field = inputs.Nth(i);
+
+            // Skip hidden/invisible fields (CSRF tokens, JS-populated file inputs, etc.)
+            if (!await field.IsVisibleAsync()) continue;
+
             var key = await FieldMapper.ResolveProfileKeyAsync(page, field);
             if (key != null) continue;
 
-            // Field is required but not mapped — gather identifier for the reason string
+            // Field is visible, required, and not mapped — gather identifier for the reason string
             var label = await FieldMapper.GetLabelTextAsync(page, field);
             if (string.IsNullOrEmpty(label))
                 label = await field.GetAttributeAsync("name") ?? await field.GetAttributeAsync("id") ?? "unknown";
@@ -32,17 +36,21 @@ public class FormFieldDetector
         return null;
     }
 
-    // Detects presence of a captcha element on the page.
+    // Detects an INTERACTIVE captcha challenge on the page.
+    // reCAPTCHA v3 loads a badge in the bottom-right corner (anchor frame) — this is an invisible
+    // background scorer and never requires user interaction. We only block on the challenge frame
+    // ("bframe") or hCaptcha iframes, not the v3 badge or the recaptcha/api.js script tag.
     public async Task<CaptchaInfo?> DetectCaptchaAsync(IPage page)
     {
-        if (await page.Locator("iframe[src*='recaptcha']").CountAsync() > 0)
+        // reCAPTCHA v2 interactive challenge frame (not the v3 anchor badge)
+        if (await page.Locator("iframe[src*='recaptcha/api2/bframe']").CountAsync() > 0)
             return new CaptchaInfo { Type = "recaptcha" };
-        if (await page.Locator("iframe[src*='hcaptcha']").CountAsync() > 0)
+        // hCaptcha interactive challenge
+        if (await page.Locator("iframe[src*='hcaptcha.com/captcha']").CountAsync() > 0)
             return new CaptchaInfo { Type = "hcaptcha" };
-        if (await page.Locator("[data-sitekey]").CountAsync() > 0)
-            return new CaptchaInfo { Type = "recaptcha_v3" };
-        if (await page.Locator("script[src*='recaptcha/api.js']").CountAsync() > 0)
-            return new CaptchaInfo { Type = "recaptcha_v3" };
+        // Visible reCAPTCHA v2 checkbox widget (data-sitekey on a div, not a script)
+        if (await page.Locator("div[data-sitekey]:visible").CountAsync() > 0)
+            return new CaptchaInfo { Type = "recaptcha" };
         return null;
     }
 

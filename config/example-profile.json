@@ -20,6 +20,8 @@
   "citizenship_country": "United States",
   "current_employer": "ACME Corp",
   "current_title": "Software Engineer",
+  "previous_employer": "Previous Corp",
+  "previous_title": "Junior Software Engineer",
   "years_experience": "5",
   "earliest_start_date": "Two weeks notice",
   "salary_expectations": "Negotiable",

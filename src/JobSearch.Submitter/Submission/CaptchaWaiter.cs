@@ -30,9 +30,6 @@ public class CaptchaWaiter
         // Bring the browser window to the front
         await page.BringToFrontAsync();
 
-        // Audible alert (Windows)
-        try { Console.Beep(800, 500); } catch { /* Non-Windows, ignore */ }
-
         _logger.Information(
             "CAPTCHA [{Type}] on {Company} - {Title} at {Url}. " +
             "Solve in browser, then press Enter here, or wait for auto-detection.",
@@ -47,17 +44,21 @@ public class CaptchaWaiter
 
             await Task.Delay(2000, ct);
 
-            // Check for Enter key pressed in console
-            if (Console.KeyAvailable)
+            // Check for Enter key pressed in console (not available when stdin is redirected)
+            try
             {
-                var key = Console.ReadKey(intercept: true);
-                if (key.Key == ConsoleKey.Enter)
+                if (Console.KeyAvailable)
                 {
-                    _logger.Information("CAPTCHA: user pressed Enter — treating as solved");
-                    await PostSolveDelay(ct);
-                    return null;
+                    var key = Console.ReadKey(intercept: true);
+                    if (key.Key == ConsoleKey.Enter)
+                    {
+                        _logger.Information("CAPTCHA: user pressed Enter — treating as solved");
+                        await PostSolveDelay(ct);
+                        return null;
+                    }
                 }
             }
+            catch (InvalidOperationException) { /* stdin redirected — skip key check */ }
 
             // Poll for automatic solve signals
             if (await IsSolvedAsync(page, captcha))

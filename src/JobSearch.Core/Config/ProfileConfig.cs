@@ -28,6 +28,8 @@ public class ProfileConfig
     [JsonPropertyName("citizenship_country")] public string CitizenshipCountry { get; set; } = "United States";
     [JsonPropertyName("current_employer")] public string CurrentEmployer { get; set; } = "";
     [JsonPropertyName("current_title")] public string CurrentTitle { get; set; } = "";
+    [JsonPropertyName("previous_employer")] public string PreviousEmployer { get; set; } = "";
+    [JsonPropertyName("previous_title")] public string PreviousTitle { get; set; } = "";
     [JsonPropertyName("years_experience")] public string YearsExperience { get; set; } = "";
     [JsonPropertyName("earliest_start_date")] public string EarliestStartDate { get; set; } = "Two weeks notice";
     [JsonPropertyName("salary_expectations")] public string SalaryExpectations { get; set; } = "Negotiable";

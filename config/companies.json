@@ -1,5 +1,36 @@
 {
-  "greenhouse": ["stripe"],
-  "lever": ["anchorage"],
-  "ashby": ["runway", "linear"]
+  "greenhouse": [
+    "affirm",
+    "airbnb",
+    "airtable",
+    "anthropic",
+    "brex",
+    "chime",
+    "circleci",
+    "databricks",
+    "datadog",
+    "dropbox",
+    "gitlab",
+    "gusto",
+    "instacart",
+    "jetbrains",
+    "lattice",
+    "lyft",
+    "mongodb",
+    "pinterest",
+    "reddit",
+    "robinhood",
+    "stripe",
+    "sumologic",
+    "twilio",
+    "vercel",
+    "waymo"
+  ],
+  "lever": [
+    "anchorage"
+  ],
+  "ashby": [
+    "runway",
+    "linear"
+  ]
 }

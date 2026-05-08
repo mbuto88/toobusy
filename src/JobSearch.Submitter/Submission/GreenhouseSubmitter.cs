@@ -29,14 +29,17 @@ public class GreenhouseSubmitter : IFormSubmitter
             // Navigate to job listing and simulate reading
             _logger.Information("Navigating to {Url}", posting.Url);
             await page.GotoAsync(posting.Url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+            await DismissCookieConsentAsync(page, ct);
             await HumanizedBrowsing.SimulatePageReadAsync(page, ct);
 
             // Click Apply button
             var applyBtn = page.Locator("a:has-text('Apply'), button:has-text('Apply'), a[href*='apply']").First;
             if (await applyBtn.CountAsync() > 0)
             {
+                await DismissCookieConsentAsync(page, ct);
                 await applyBtn.ClickAsync();
                 await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                await DismissCookieConsentAsync(page, ct);
                 await Task.Delay(Random.Shared.Next(800, 1500), ct);
             }
 
@@ -47,7 +50,10 @@ public class GreenhouseSubmitter : IFormSubmitter
                 var captchaResult = await _captchaWaiter.WaitForHumanSolveAsync(
                     page, captcha, posting.Company, posting.Title, posting.Url, ct);
                 if (captchaResult != null)
+                {
+                    if (dryRun) await ShowNeedsManualAlertAsync(page, captchaResult);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = captchaResult };
+                }
             }
 
             // Check for required custom questions before filling anything
@@ -55,6 +61,7 @@ public class GreenhouseSubmitter : IFormSubmitter
             if (customReason != null)
             {
                 _logger.Information("{Company}/{Id}: {Reason} → needs_manual", posting.Company, posting.Id, customReason);
+                if (dryRun) await ShowNeedsManualAlertAsync(page, customReason);
                 return new SubmissionResult { NeedsManual = true, NeedsManualReason = customReason };
             }
 
@@ -66,7 +73,10 @@ public class GreenhouseSubmitter : IFormSubmitter
             {
                 var eeoReason = await _detector.HandleEeoSectionAsync(page, ct);
                 if (eeoReason != null)
+                {
+                    if (dryRun) await ShowNeedsManualAlertAsync(page, eeoReason);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = eeoReason };
+                }
             }
 
             // Check captcha again post-fill
@@ -76,7 +86,10 @@ public class GreenhouseSubmitter : IFormSubmitter
                 var captchaResult = await _captchaWaiter.WaitForHumanSolveAsync(
                     page, captcha, posting.Company, posting.Title, posting.Url, ct);
                 if (captchaResult != null)
+                {
+                    if (dryRun) await ShowNeedsManualAlertAsync(page, captchaResult);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = captchaResult };
+                }
             }
 
             if (dryRun)
@@ -85,6 +98,7 @@ public class GreenhouseSubmitter : IFormSubmitter
                 var screenshotPath = "data/dry-run-screenshot.png";
                 await page.ScreenshotAsync(new PageScreenshotOptions { Path = screenshotPath, FullPage = true });
                 _logger.Information("Screenshot saved to {Path}", screenshotPath);
+                await Task.Delay(TimeSpan.FromMinutes(1), ct);
                 return new SubmissionResult { Success = true, ConfirmationText = "DRY_RUN" };
             }
 
@@ -122,8 +136,17 @@ public class GreenhouseSubmitter : IFormSubmitter
 
     private static async Task FillFormAsync(IPage page, ProfileConfig profile, CancellationToken ct)
     {
-        // Iterate all text-type inputs; FieldMapper resolves each to a profile key dynamically.
-        var inputs = page.Locator(
+        // Scope to the application form container so we don't fill job-alert or search fields.
+        // Greenhouse uses #application or #application_form; fall back to the whole page if not found.
+        var formContainerSelectors = new[] { "#application", "#application_form", "form[action*='application']", "form[action*='apply']" };
+        ILocator scope = page.Locator("body");
+        foreach (var sel in formContainerSelectors)
+        {
+            var candidate = page.Locator(sel);
+            if (await candidate.CountAsync() > 0) { scope = candidate.First; break; }
+        }
+
+        var inputs = scope.Locator(
             "input[type=text], input[type=email], input[type=tel], input[type=url], input:not([type])");
         var count = await inputs.CountAsync();
         var filledKeys = new HashSet<string>();
@@ -149,7 +172,7 @@ public class GreenhouseSubmitter : IFormSubmitter
         // Resume upload
         if (!string.IsNullOrEmpty(profile.ResumePath) && File.Exists(profile.ResumePath))
         {
-            var fileInput = page.Locator("input[type=file]").First;
+            var fileInput = scope.Locator("input[type=file]").First;
             if (await fileInput.CountAsync() > 0)
             {
                 await fileInput.SetInputFilesAsync(profile.ResumePath);
@@ -169,6 +192,55 @@ public class GreenhouseSubmitter : IFormSubmitter
             return page.Url;
         }
         catch { return page.Url; }
+    }
+
+    // Dismisses common cookie consent / GDPR dialogs so they don't block form clicks.
+    private static async Task DismissCookieConsentAsync(IPage page, CancellationToken ct)
+    {
+        try
+        {
+            // Common selectors for accept/dismiss buttons inside cookie dialogs
+            var acceptSelectors = new[]
+            {
+                "[aria-label='Cookie consent'] button",
+                ".consent-modal button",
+                ".cookie-banner button",
+                "#cookie-banner button",
+                "button:has-text('Accept all')",
+                "button:has-text('Accept All')",
+                "button:has-text('Accept cookies')",
+                "button:has-text('I accept')",
+                "button:has-text('I Accept')",
+                "button:has-text('Agree')",
+                "button:has-text('OK')",
+                "[data-testid='cookie-accept']",
+                "#accept-cookie-consent",
+            };
+
+            foreach (var sel in acceptSelectors)
+            {
+                var btn = page.Locator(sel).First;
+                if (await btn.CountAsync() > 0 && await btn.IsVisibleAsync())
+                {
+                    await btn.ClickAsync(new LocatorClickOptions { Timeout = 3000 });
+                    await Task.Delay(500, ct);
+                    return;
+                }
+            }
+        }
+        catch { /* best effort — don't block the flow */ }
+    }
+
+    // Shows a native browser alert with the needs_manual reason and waits for user to dismiss it.
+    // In headful mode this freezes the process until OK is clicked.
+    private static async Task ShowNeedsManualAlertAsync(IPage page, string reason)
+    {
+        try
+        {
+            var message = $"Needs Manual Review:\\n{reason.Replace("'", "\\'")}";
+            await page.EvaluateAsync($"window.alert('{message}')");
+        }
+        catch { /* page may have navigated or closed */ }
     }
 
     private async Task TakeFailureScreenshotAsync(IPage page, string postingId)
