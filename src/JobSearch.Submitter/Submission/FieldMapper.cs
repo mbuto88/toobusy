@@ -35,6 +35,9 @@ public static class FieldMapper
         ["postal_code"] = "address.zip",
         ["postcode"] = "address.zip",
         ["country"] = "address.country",
+        ["phone_country_code"] = "phone_country_code",
+        ["job_application[phone_country_code]"] = "phone_country_code",
+        ["phone[country_code]"] = "phone_country_code",
         ["work_authorization"] = "work_authorization",
         ["legally_authorized"] = "work_authorization",
         ["sponsorship_required"] = "sponsorship_required",
@@ -132,6 +135,8 @@ public static class FieldMapper
         ("salary",                    "salary_expectations"),
         ("telephone",                 "phone"),
         ("mobile",                    "phone"),
+        ("country code",              "phone_country_code"),
+        ("phone country",             "phone_country_code"),
         ("country",                   "address.country"),
         ("e-mail",                    "email"),
         ("email",                     "email"),
@@ -211,6 +216,7 @@ public static class FieldMapper
         "how_did_you_hear"   => profile.HowDidYouHear,
         "pronouns"           => profile.Pronouns,
         "willing_to_relocate" => profile.WillingToRelocate,
+        "phone_country_code"  => null,   // iti widget handles this; filling it breaks the phone field
         "full_name"          => $"{profile.FirstName} {profile.LastName}".Trim(),
         "legal_name"         => !string.IsNullOrEmpty(profile.LegalName) ? profile.LegalName : $"{profile.FirstName} {profile.LastName}".Trim(),
         _ => null
@@ -220,22 +226,51 @@ public static class FieldMapper
     public static bool IsTypoEligible(string key) =>
         key is "current_employer" or "linkedin_url" or "github_url" or "portfolio_url" or "desired_location";
 
-    // Gets label text for a form element by looking up its associated <label for="..."> element.
+    // Gets label text for a form element. Tries (in order):
+    //   1. <label for="id">
+    //   2. Wrapping ancestor <label>
+    //   3. aria-label attribute
+    //   4. aria-labelledby pointing to another element
+    //   5. Immediately preceding sibling element text (covers unlabelled widgets)
     public static async Task<string?> GetLabelTextAsync(IPage page, ILocator field, string? id = null)
     {
         try
         {
             id ??= await field.GetAttributeAsync("id");
+
+            // 1. <label for="id">
             if (!string.IsNullOrEmpty(id))
             {
                 var label = page.Locator($"label[for='{id}']");
                 if (await label.CountAsync() > 0)
                     return await label.First.InnerTextAsync();
             }
-            // Fallback: look for wrapping label
+
+            // 2. Ancestor <label>
             var parentLabel = field.Locator("xpath=ancestor::label");
             if (await parentLabel.CountAsync() > 0)
                 return await parentLabel.First.InnerTextAsync();
+
+            // 3. aria-label attribute
+            var ariaLabel = await field.GetAttributeAsync("aria-label");
+            if (!string.IsNullOrEmpty(ariaLabel)) return ariaLabel;
+
+            // 4. aria-labelledby
+            var labelledBy = await field.GetAttributeAsync("aria-labelledby");
+            if (!string.IsNullOrEmpty(labelledBy))
+            {
+                var labelEl = page.Locator($"#{labelledBy}");
+                if (await labelEl.CountAsync() > 0)
+                    return await labelEl.First.InnerTextAsync();
+            }
+
+            // 5. Immediately preceding sibling (handles widgets where label is a sibling div/span)
+            var prevSibling = field.Locator("xpath=preceding-sibling::*[1]");
+            if (await prevSibling.CountAsync() > 0)
+            {
+                var sibText = (await prevSibling.First.InnerTextAsync()).Trim();
+                if (!string.IsNullOrEmpty(sibText)) return sibText;
+            }
         }
         catch { /* ignore */ }
         return null;

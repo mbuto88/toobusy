@@ -49,6 +49,9 @@ public class SubmitterWorker : BackgroundService
     {
         _logger.Information("SubmitterWorker started (dryRun={DryRun})", _dryRun);
 
+        var queuedCount = _postings.GetByStatus(PostingStatus.New).Count;
+        _logger.Information("Postings queued (status=new): {Count}", queuedCount);
+
         using var playwright = await Playwright.CreateAsync();
 
         // Per-ATS browser contexts: each ATS gets its own persistent profile directory

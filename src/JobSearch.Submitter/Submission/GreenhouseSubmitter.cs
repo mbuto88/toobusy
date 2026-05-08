@@ -51,17 +51,17 @@ public class GreenhouseSubmitter : IFormSubmitter
                     page, captcha, posting.Company, posting.Title, posting.Url, ct);
                 if (captchaResult != null)
                 {
-                    if (dryRun) await ShowNeedsManualAlertAsync(page, captchaResult);
+                    await TakeNeedsManualScreenshotAsync(page, posting.Id, captchaResult);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = captchaResult };
                 }
             }
 
-            // Fill form fields — unknown required fields prompt the user inline via confirm()
+            // Fill form fields
             var fillReason = await FillFormAsync(page, profile, _logger, ct);
             if (fillReason != null)
             {
-                _logger.Information("{Company}/{Id}: {Reason} → needs_manual", posting.Company, posting.Id, fillReason);
-                if (dryRun) await ShowNeedsManualAlertAsync(page, fillReason);
+                _logger.Warning("{Company}/{Id}: {Reason} → needs_manual", posting.Company, posting.Id, fillReason);
+                await TakeNeedsManualScreenshotAsync(page, posting.Id, fillReason);
                 return new SubmissionResult { NeedsManual = true, NeedsManualReason = fillReason };
             }
 
@@ -71,7 +71,7 @@ public class GreenhouseSubmitter : IFormSubmitter
                 var eeoReason = await _detector.HandleEeoSectionAsync(page, ct);
                 if (eeoReason != null)
                 {
-                    if (dryRun) await ShowNeedsManualAlertAsync(page, eeoReason);
+                    await TakeNeedsManualScreenshotAsync(page, posting.Id, eeoReason);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = eeoReason };
                 }
             }
@@ -84,7 +84,7 @@ public class GreenhouseSubmitter : IFormSubmitter
                     page, captcha, posting.Company, posting.Title, posting.Url, ct);
                 if (captchaResult != null)
                 {
-                    if (dryRun) await ShowNeedsManualAlertAsync(page, captchaResult);
+                    await TakeNeedsManualScreenshotAsync(page, posting.Id, captchaResult);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = captchaResult };
                 }
             }
@@ -112,7 +112,10 @@ public class GreenhouseSubmitter : IFormSubmitter
                 var captchaResult = await _captchaWaiter.WaitForHumanSolveAsync(
                     page, captcha, posting.Company, posting.Title, posting.Url, ct);
                 if (captchaResult != null)
+                {
+                    await TakeNeedsManualScreenshotAsync(page, posting.Id, captchaResult);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = captchaResult };
+                }
             }
 
             var confirmation = await ExtractConfirmationAsync(page);
@@ -154,11 +157,18 @@ public class GreenhouseSubmitter : IFormSubmitter
             "form[action*='apply']",
         };
         ILocator scope = page.Locator("body");
+        var matchedSelector = "body (fallback)";
         foreach (var sel in formContainerSelectors)
         {
             var candidate = page.Locator(sel);
-            if (await candidate.CountAsync() > 0) { scope = candidate.First; break; }
+            if (await candidate.CountAsync() > 0)
+            {
+                scope = candidate.First;
+                matchedSelector = sel;
+                break;
+            }
         }
+        logger.Information("Form scope matched: {Selector}", matchedSelector);
 
         // --- Text / email / tel / url / textarea inputs ---
         var inputs = scope.Locator(
@@ -180,18 +190,28 @@ public class GreenhouseSubmitter : IFormSubmitter
                         ?? await field.GetAttributeAsync("name")
                         ?? await field.GetAttributeAsync("id")
                         ?? "unknown";
-                    var skip = await page.EvaluateAsync<bool>(
-                        "msg => window.confirm(msg)",
-                        $"Unknown required field: \"{label}\"\n\nOK = skip this field and continue\nCancel = flag for manual review");
-                    if (!skip) return $"unmapped_required_field: {label}";
+                    logger.Warning("  Unmapped required field: {Label} — flagging needs_manual", label);
+                    return $"unmapped_required_field: {label}";
+                }
+                else if (key != null && filledKeys.Contains(key))
+                {
+                    logger.Information("  Field {Key}: already filled — skipping duplicate", key);
                 }
                 continue;
             }
 
             var value = FieldMapper.GetValue(profile, key);
-            if (string.IsNullOrEmpty(value)) continue;
+            if (string.IsNullOrEmpty(value))
+            {
+                logger.Information("  Field {Key}: no profile value — skipping", key);
+                continue;
+            }
 
-            if (!await field.IsVisibleAsync()) continue;
+            if (!await field.IsVisibleAsync())
+            {
+                logger.Information("  Field {Key}: not visible — skipping", key);
+                continue;
+            }
 
             try
             {
@@ -223,17 +243,18 @@ public class GreenhouseSubmitter : IFormSubmitter
                     await HumanizedInput.DelayBetweenFieldsAsync(ct);
                 }
 
+                logger.Information("  Filled {Key} = '{Value}'", key, value.Length > 60 ? value[..60] + "…" : value);
                 filledKeys.Add(key);
                 isFirst = false;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger.Warning("Could not fill field {Key}: {Error} — skipping", key, ex.Message);
+                logger.Warning("  Could not fill field {Key}: {Error} — skipping", key, ex.Message);
             }
         }
 
         // --- Select / dropdown fields ---
-        var selectReason = await FillSelectsAsync(page, scope, profile, ct);
+        var selectReason = await FillSelectsAsync(page, scope, profile, ct, logger);
         if (selectReason != null) return selectReason;
 
         // --- Resume upload (required file input) ---
@@ -248,17 +269,18 @@ public class GreenhouseSubmitter : IFormSubmitter
         }
 
         // --- Required checkboxes (certify / declare) — leave opt-in agreement boxes unchecked ---
-        await HandleCheckboxesAsync(scope, ct);
+        await HandleCheckboxesAsync(scope, ct, logger);
 
         return null;
     }
 
     // Fills all <select> dropdown fields within the scoped form container.
     // Uses JS dispatch to handle selectize-hidden native <select> elements.
-    private static async Task<string?> FillSelectsAsync(IPage page, ILocator scope, ProfileConfig profile, CancellationToken ct)
+    private static async Task<string?> FillSelectsAsync(IPage page, ILocator scope, ProfileConfig profile, CancellationToken ct, ILogger? logger = null)
     {
         var selects = scope.Locator("select");
         var count = await selects.CountAsync();
+        logger?.Information("  Selects found: {Count}", count);
 
         for (var i = 0; i < count; i++)
         {
@@ -281,15 +303,18 @@ public class GreenhouseSubmitter : IFormSubmitter
 
             if (chosen == null)
             {
-                if (!required) continue;
+                if (!required)
+                {
+                    logger?.Information("  Select {Key}: no match, not required — skipping", key ?? "unknown");
+                    continue;
+                }
 
                 var labelText = await FieldMapper.GetLabelTextAsync(page, sel) ?? key ?? "unknown_select";
-                var skip = await page.EvaluateAsync<bool>(
-                    "msg => window.confirm(msg)",
-                    $"Unknown required dropdown: \"{labelText}\"\n\nOK = skip and continue\nCancel = flag for manual review");
-                if (!skip) return $"unmapped_required_select: {labelText}";
-                continue;
+                logger?.Warning("  Unmapped required dropdown '{Label}' options=[{Options}] — flagging needs_manual", labelText, string.Join(", ", options));
+                return $"unmapped_required_select: {labelText}";
             }
+
+            logger?.Information("  Select {Key}: chose '{Chosen}'", key ?? "unknown", chosen);
 
             // Set value on the native <select> and dispatch change (works even when selectize hides it)
             var chosenCapture = chosen;
@@ -365,16 +390,19 @@ public class GreenhouseSubmitter : IFormSubmitter
 
     // Checks all required checkboxes (certification / declaration) within scope.
     // Non-required checkboxes (talent-community opt-in, job-alert subscription) are intentionally left unchecked.
-    private static async Task HandleCheckboxesAsync(ILocator scope, CancellationToken ct)
+    private static async Task HandleCheckboxesAsync(ILocator scope, CancellationToken ct, ILogger? logger = null)
     {
         var required = scope.Locator("input[type=checkbox][required]");
         var count = await required.CountAsync();
+        logger?.Information("  Required checkboxes found: {Count}", count);
         for (var i = 0; i < count; i++)
         {
             var cb = required.Nth(i);
             if (await cb.IsVisibleAsync() && !await cb.IsCheckedAsync())
             {
+                var cbId = await cb.GetAttributeAsync("id") ?? $"checkbox[{i}]";
                 await cb.CheckAsync();
+                logger?.Information("  Checked required checkbox: {Id}", cbId);
                 await Task.Delay(Random.Shared.Next(100, 300), ct);
             }
         }
@@ -451,16 +479,21 @@ public class GreenhouseSubmitter : IFormSubmitter
         catch { /* best effort — don't block the flow */ }
     }
 
-    // Shows a native browser alert with the needs_manual reason and waits for user to dismiss it.
-    // In headful mode this freezes the process until OK is clicked.
-    private static async Task ShowNeedsManualAlertAsync(IPage page, string reason)
+    private async Task TakeNeedsManualScreenshotAsync(IPage page, string postingId, string reason)
     {
         try
         {
-            var message = $"Needs Manual Review:\\n{reason.Replace("'", "\\'")}";
-            await page.EvaluateAsync($"window.alert('{message}')");
+            var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+            var safeReason = string.Concat(reason.Take(40)).Replace(':', '_').Replace('/', '_').Replace(' ', '-');
+            var path = Path.Combine("data", "failures", $"{postingId}_{timestamp}_needsmanual_{safeReason}.png");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await page.ScreenshotAsync(new PageScreenshotOptions { Path = path, FullPage = true });
+            _logger.Information("Needs-manual screenshot saved to {Path}", path);
         }
-        catch { /* page may have navigated or closed */ }
+        catch (Exception ex)
+        {
+            _logger.Warning("Could not take needs-manual screenshot: {Error}", ex.Message);
+        }
     }
 
     private async Task TakeFailureScreenshotAsync(IPage page, string postingId)
