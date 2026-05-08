@@ -105,11 +105,11 @@ public static class FieldMapper
         ("postal code",               "address.zip"),
         ("zip code",                  "address.zip"),
         ("postcode",                  "address.zip"),
-        ("full legal name",            "full_name"),
-        ("legal name",                "full_name"),
+        ("full legal name",            "legal_name"),
+        ("legal name",                "legal_name"),
+        ("name as it appears",        "legal_name"),
+        ("government id",             "legal_name"),
         ("full name",                 "full_name"),
-        ("name as it appears",        "full_name"),
-        ("government id",             "full_name"),
         ("family name",               "last_name"),
         ("given name",                "first_name"),
         ("first name",                "first_name"),
@@ -212,6 +212,7 @@ public static class FieldMapper
         "pronouns"           => profile.Pronouns,
         "willing_to_relocate" => profile.WillingToRelocate,
         "full_name"          => $"{profile.FirstName} {profile.LastName}".Trim(),
+        "legal_name"         => !string.IsNullOrEmpty(profile.LegalName) ? profile.LegalName : $"{profile.FirstName} {profile.LastName}".Trim(),
         _ => null
     };
 

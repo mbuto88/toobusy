@@ -18,6 +18,7 @@ public class ProfileConfig
     [JsonPropertyName("preferred_name")] public string PreferredName { get; set; } = "";
     [JsonPropertyName("email")] public string Email { get; set; } = "";
     [JsonPropertyName("phone")] public string Phone { get; set; } = "";
+    [JsonPropertyName("legal_name")] public string LegalName { get; set; } = "";
     [JsonPropertyName("resume_path")] public string ResumePath { get; set; } = "";
     [JsonPropertyName("linkedin_url")] public string LinkedInUrl { get; set; } = "";
     [JsonPropertyName("github_url")] public string GitHubUrl { get; set; } = "";
