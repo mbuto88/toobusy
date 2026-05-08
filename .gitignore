@@ -1,0 +1,32 @@
+# Build outputs
+bin/
+obj/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Runtime data (generated at runtime, not source)
+data/jobsearch.db
+data/jobsearch.db-wal
+data/jobsearch.db-shm
+data/failures/
+data/dry-run-screenshot.png
+data/schema-samples/
+logs/
+reports/
+
+# Playwright browser profiles (contain session cookies — never commit)
+data/browser-profiles/
+
+# Applicant profile — contains PII (name, email, phone, resume path)
+# Copy config/example-profile.json → config/profile.json and fill in your details
+config/profile.json
+
+# OS
+.DS_Store
+Thumbs.db

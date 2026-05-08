@@ -1,0 +1,113 @@
+Build a job application automation system in C# .NET 8. The system has three components: a discovery poller, an application submitter, and a tracking database. Build them as separate console apps or worker services in a single solution so they can run independently.
+Tech stack constraints:
+
+C# .NET 8
+SQLite via Microsoft.Data.Sqlite for tracking
+Playwright for .NET for any browser automation
+HttpClient with Polly for retry policies on API calls
+Serilog for logging to file
+
+Component 1: Discovery poller
+Polls public ATS APIs daily and writes new postings to SQLite.
+Sources to support:
+
+Greenhouse: GET https://boards-api.greenhouse.io/v1/boards/{company_slug}/jobs?content=true returns JSON with all postings for a company
+Lever: GET https://api.lever.co/v0/postings/{company_slug}?mode=json returns JSON
+Ashby: GET https://api.ashbyhq.com/posting-api/job-board/{company_slug} returns JSON
+
+Verify the exact response schemas by hitting each endpoint with a known company slug before writing the parser. Do not assume field names. Known working slugs to test: stripe on Greenhouse, netflix on Lever, ashbyhq on Ashby.
+Read company slugs from a config file companies.json with structure:
+{
+  "greenhouse": ["stripe", "airbnb", ...],
+  "lever": ["netflix", ...],
+  "ashby": ["ashbyhq", ...]
+}
+For each posting, filter on:
+
+Location contains "Seattle" or "Remote" or "WA" (case insensitive, check multiple location field shapes because each ATS structures location differently)
+Title contains software engineer, swe, backend engineer, full stack, or similar (configurable list)
+
+Write to SQLite table postings with columns: id (ats + slug + posting_id as primary key), company, title, location, url, posted_date, discovered_date, ats_source, raw_json, status (default "new").
+Dedupe on the composite ID so reruns don't create duplicates.
+Rate limiting and avoiding flags on discovery:
+These are public APIs with no auth, but still:
+
+Sequential requests, not parallel
+Random delay between 3 and 8 seconds between each company
+Set a realistic User-Agent header, rotate between 3 to 5 common browser UAs
+Run once daily at a randomized time between 6am and 10am PT, not on the hour
+If a request fails, exponential backoff, do not retry more than 3 times
+Log every request and response code
+
+Component 2: Application submitter
+Reads new postings from SQLite, filters to Greenhouse and Lever only for now (skip Ashby and Workday in v1), and submits applications via Playwright.
+For each posting with status "new":
+
+Open the application URL in Playwright with a real browser context, not headless. Headless gets detected. Use playwright with headless: false but you can run it on a separate display or just let it pop up.
+Parse the form fields. Greenhouse and Lever have consistent field names: first_name, last_name, email, phone, resume upload, plus optional custom questions.
+Check for custom questions. If the form has any required free-text question beyond name/email/phone/resume, mark posting as "needs_manual" in DB and skip. Do not attempt LLM-generated answers in v1.
+Fill standard fields from a config file profile.json:
+
+{
+  "first_name": "Michael",
+  "last_name": "...",
+  "email": "...",
+  "phone": "...",
+  "resume_path": "/path/to/resume.pdf",
+  "linkedin_url": "...",
+  "github_url": "...",
+  "work_authorization": "Yes",
+  "sponsorship_required": "No",
+  "current_employer": "Accenture",
+  "years_experience": "6"
+}
+
+Upload resume via Playwright's setInputFiles
+Handle EEO questions with "Decline to self-identify" or equivalent, configurable
+Submit form
+Capture confirmation page text or URL change as evidence
+Update DB: status = "submitted", submitted_date, confirmation_text
+
+If any step fails, status = "failed", error_message logged, move on to next posting.
+Rate limiting on submission, this is the critical part:
+
+Maximum 45 submissions per day total across all companies
+Random delay between submissions: pick uniformly between 8 and 35 minutes
+Distribute submissions across a window from 9am to 6pm PT, do not submit at night
+Never submit two applications to the same company within 7 days
+Add randomized human-like delays inside form filling: 200 to 800ms between field fills, 100 to 300ms between keystrokes when typing (Playwright supports this with type() delay parameter)
+Move mouse to fields before clicking, do not just programmatically click
+Use a persistent browser context per session so cookies and fingerprint stay consistent
+Use a real Chrome install via channel: "chrome" in Playwright launch options, not the bundled Chromium
+
+Component 3: Tracking and reporting
+Simple console command that prints:
+
+Postings discovered today, this week, total
+Applications submitted today, this week, total
+Postings flagged needs_manual that you should review
+Failed submissions with error messages
+
+Write a daily summary to a markdown file in /home/michael/job-search/daily/{date}.md
+What I do not want you to build in v1:
+
+LinkedIn integration
+Workday support
+LLM-generated cover letters or custom question answers
+Email or Slack notifications
+A web UI
+
+Order of build:
+
+SQLite schema and migrations
+Greenhouse poller, verify against live API, confirm schema
+Lever poller, same verification
+Filter and dedupe logic
+Profile config loading
+Playwright submitter for Greenhouse first, test against one real posting in dry-run mode that fills but does not submit
+Submitter for Lever
+Rate limiting and scheduling layer
+Tracking report
+
+Before each component, write tests against the live APIs to confirm response shape. Do not write the parser based on assumed schemas. Hit the endpoint, log the response, then write the parser.
+When in doubt about a field name or behavior, log what you see and ask. Do not guess.
