@@ -264,11 +264,27 @@ public static class FieldMapper
                     return await labelEl.First.InnerTextAsync();
             }
 
-            // 5. Immediately preceding sibling (handles widgets where label is a sibling div/span)
+            // 5. Immediately preceding sibling
             var prevSibling = field.Locator("xpath=preceding-sibling::*[1]");
             if (await prevSibling.CountAsync() > 0)
             {
                 var sibText = (await prevSibling.First.InnerTextAsync()).Trim();
+                if (!string.IsNullOrEmpty(sibText)) return sibText;
+            }
+
+            // 6. Parent's preceding sibling (input inside a wrapper div, label beside wrapper)
+            var parentSib = field.Locator("xpath=parent::*/preceding-sibling::*[1]");
+            if (await parentSib.CountAsync() > 0)
+            {
+                var sibText = (await parentSib.First.InnerTextAsync()).Trim();
+                if (!string.IsNullOrEmpty(sibText)) return sibText;
+            }
+
+            // 7. Grandparent's preceding sibling (deeply wrapped inputs)
+            var grandSib = field.Locator("xpath=parent::*/parent::*/preceding-sibling::*[1]");
+            if (await grandSib.CountAsync() > 0)
+            {
+                var sibText = (await grandSib.First.InnerTextAsync()).Trim();
                 if (!string.IsNullOrEmpty(sibText)) return sibText;
             }
         }

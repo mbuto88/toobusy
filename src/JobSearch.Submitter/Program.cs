@@ -25,6 +25,17 @@ var logger = Log.Logger;
 var db = new Database(PathHelper.ConfigPath(config.DatabasePath));
 new Migrations(db).RunAll();
 
+// One-time reset of records falsely marked submitted during test runs
+if (args.Contains("--reset-db"))
+{
+    using var conn = db.OpenConnection();
+    using var cmd = conn.CreateCommand();
+    cmd.CommandText = "UPDATE postings SET status='new', submitted_date=NULL, confirmation_text=NULL WHERE id='greenhouse_vercel_5473266004' AND status='submitted'";
+    var rows = cmd.ExecuteNonQuery();
+    logger.Information("Reset {Rows} record(s)", rows);
+    return;
+}
+
 var postingsRepo = new PostingsRepository(db, logger);
 var companiesRepo = new CompaniesRepository(db);
 

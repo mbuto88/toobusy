@@ -23,6 +23,7 @@ public class GreenhouseSubmitter : IFormSubmitter
         IBrowserContext context, bool dryRun, CancellationToken ct)
     {
         var page = await context.NewPageAsync();
+        var keepOpen = false;  // set true on needs_manual — tab stays open for human to complete
 
         try
         {
@@ -52,6 +53,9 @@ public class GreenhouseSubmitter : IFormSubmitter
                 if (captchaResult != null)
                 {
                     await TakeNeedsManualScreenshotAsync(page, posting.Id, captchaResult);
+                    keepOpen = true;
+                    await page.BringToFrontAsync();
+                    _logger.Warning("Tab left open for manual completion — {Url}", posting.Url);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = captchaResult };
                 }
             }
@@ -62,6 +66,9 @@ public class GreenhouseSubmitter : IFormSubmitter
             {
                 _logger.Warning("{Company}/{Id}: {Reason} → needs_manual", posting.Company, posting.Id, fillReason);
                 await TakeNeedsManualScreenshotAsync(page, posting.Id, fillReason);
+                keepOpen = true;
+                await page.BringToFrontAsync();
+                _logger.Warning("Tab left open for manual completion — {Url}", posting.Url);
                 return new SubmissionResult { NeedsManual = true, NeedsManualReason = fillReason };
             }
 
@@ -72,6 +79,9 @@ public class GreenhouseSubmitter : IFormSubmitter
                 if (eeoReason != null)
                 {
                     await TakeNeedsManualScreenshotAsync(page, posting.Id, eeoReason);
+                    keepOpen = true;
+                    await page.BringToFrontAsync();
+                    _logger.Warning("Tab left open for manual completion — {Url}", posting.Url);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = eeoReason };
                 }
             }
@@ -85,6 +95,9 @@ public class GreenhouseSubmitter : IFormSubmitter
                 if (captchaResult != null)
                 {
                     await TakeNeedsManualScreenshotAsync(page, posting.Id, captchaResult);
+                    keepOpen = true;
+                    await page.BringToFrontAsync();
+                    _logger.Warning("Tab left open for manual completion — {Url}", posting.Url);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = captchaResult };
                 }
             }
@@ -99,11 +112,28 @@ public class GreenhouseSubmitter : IFormSubmitter
                 return new SubmissionResult { Success = true, ConfirmationText = "DRY_RUN" };
             }
 
-            // Submit
+            // Submit — wrap in RunAndWaitForNavigation so a validation failure (no page change)
+            // is detected as such rather than silently treated as success.
             var submitBtn = page.Locator("input[type=submit], button[type=submit]").First;
             await HumanizedInput.NavigateToFieldAsync(page, submitBtn, false, ct);
+            var navTask = page.WaitForNavigationAsync(new PageWaitForNavigationOptions
+            {
+                WaitUntil = WaitUntilState.DOMContentLoaded,
+                Timeout = 15_000
+            });
             await submitBtn.ClickAsync();
-            await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+            try
+            {
+                await navTask;
+            }
+            catch (TimeoutException)
+            {
+                _logger.Warning("{Company}/{Id}: no navigation after submit — required fields likely missing", posting.Company, posting.Id);
+                await TakeNeedsManualScreenshotAsync(page, posting.Id, "validation_failed");
+                keepOpen = true;
+                await page.BringToFrontAsync();
+                return new SubmissionResult { NeedsManual = true, NeedsManualReason = "form_validation_failed" };
+            }
 
             // Check for post-submit captcha
             captcha = await _detector.DetectCaptchaAsync(page);
@@ -114,6 +144,9 @@ public class GreenhouseSubmitter : IFormSubmitter
                 if (captchaResult != null)
                 {
                     await TakeNeedsManualScreenshotAsync(page, posting.Id, captchaResult);
+                    keepOpen = true;
+                    await page.BringToFrontAsync();
+                    _logger.Warning("Tab left open for manual completion — {Url}", posting.Url);
                     return new SubmissionResult { NeedsManual = true, NeedsManualReason = captchaResult };
                 }
             }
@@ -130,7 +163,8 @@ public class GreenhouseSubmitter : IFormSubmitter
         }
         finally
         {
-            await page.CloseAsync();
+            if (!keepOpen)
+                await page.CloseAsync();
         }
     }
 
@@ -190,8 +224,36 @@ public class GreenhouseSubmitter : IFormSubmitter
                         ?? await field.GetAttributeAsync("name")
                         ?? await field.GetAttributeAsync("id")
                         ?? "unknown";
-                    logger.Warning("  Unmapped required field: {Label} — flagging needs_manual", label);
-                    return $"unmapped_required_field: {label}";
+
+                    // Completely unidentifiable field — skip silently rather than blocking on it.
+                    if (label == "unknown")
+                    {
+                        logger.Warning("  Unmapped required field with no identifiable attributes — skipping");
+                        continue;
+                    }
+
+                    // Has a recognisable label but no profile mapping — show in-browser modal so
+                    // the user can fill it manually and continue, or choose to skip the posting.
+                    logger.Warning("  Unmapped required field: {Label} — showing browser prompt", label);
+                    await page.BringToFrontAsync();
+                    var skipPosting = await page.EvaluateAsync<bool>(@"(label) => new Promise(resolve => {
+                        const ov = document.createElement('div');
+                        ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.65);z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;';
+                        const box = document.createElement('div');
+                        box.style.cssText = 'background:#fff;padding:28px 32px;border-radius:10px;max-width:440px;width:90%;box-shadow:0 8px 40px rgba(0,0,0,0.3);text-align:center;';
+                        box.innerHTML = '<div style=""font-size:28px;margin-bottom:10px"">⚠️</div>'
+                            + '<h3 style=""margin:0 0 8px;color:#1a1a1a;font-size:17px"">Unknown Required Field</h3>'
+                            + '<code style=""display:block;background:#f4f4f4;padding:8px 14px;border-radius:5px;margin:12px 0;color:#c0392b;font-size:13px;word-break:break-all;"">' + label + '</code>'
+                            + '<p style=""color:#555;font-size:13px;margin:0 0 22px;line-height:1.5"">Fill this field in the form below, then click <b>Continue</b>.<br>Or click <b>Skip Posting</b> to flag for manual review.</p>'
+                            + '<button id=""__tb_ok__"" style=""background:#0d6efd;color:#fff;border:none;padding:9px 24px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;margin-right:8px;"">Continue</button>'
+                            + '<button id=""__tb_skip__"" style=""background:#dc3545;color:#fff;border:none;padding:9px 24px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;"">Skip Posting</button>';
+                        ov.appendChild(box);
+                        document.body.appendChild(ov);
+                        document.getElementById('__tb_ok__').onclick   = () => { ov.remove(); resolve(false); };
+                        document.getElementById('__tb_skip__').onclick = () => { ov.remove(); resolve(true);  };
+                    })", label);
+                    if (skipPosting) return $"unmapped_required_field: {label}";
+                    // Continue clicked — user filled it manually, move to next field
                 }
                 else if (key != null && filledKeys.Contains(key))
                 {
@@ -310,8 +372,27 @@ public class GreenhouseSubmitter : IFormSubmitter
                 }
 
                 var labelText = await FieldMapper.GetLabelTextAsync(page, sel) ?? key ?? "unknown_select";
-                logger?.Warning("  Unmapped required dropdown '{Label}' options=[{Options}] — flagging needs_manual", labelText, string.Join(", ", options));
-                return $"unmapped_required_select: {labelText}";
+                var optList = string.Join(", ", options);
+                logger?.Warning("  Unmapped required dropdown '{Label}' options=[{Options}] — showing browser prompt", labelText, optList);
+                await page.BringToFrontAsync();
+                var skipPosting = await page.EvaluateAsync<bool>(@"(args) => new Promise(resolve => {
+                    const ov = document.createElement('div');
+                    ov.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.65);z-index:2147483647;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;';
+                    const box = document.createElement('div');
+                    box.style.cssText = 'background:#fff;padding:28px 32px;border-radius:10px;max-width:460px;width:90%;box-shadow:0 8px 40px rgba(0,0,0,0.3);text-align:center;';
+                    box.innerHTML = '<div style=""font-size:28px;margin-bottom:10px"">⚠️</div>'
+                        + '<h3 style=""margin:0 0 8px;color:#1a1a1a;font-size:17px"">Unknown Required Dropdown</h3>'
+                        + '<code style=""display:block;background:#f4f4f4;padding:8px 14px;border-radius:5px;margin:12px 0;color:#c0392b;font-size:13px;"">' + args.label + '</code>'
+                        + '<p style=""color:#555;font-size:12px;margin:0 0 4px"">Options: ' + args.options + '</p>'
+                        + '<p style=""color:#555;font-size:13px;margin:4px 0 22px;line-height:1.5"">Select a value in the form, then click <b>Continue</b>.<br>Or click <b>Skip Posting</b> to flag for manual review.</p>'
+                        + '<button id=""__tb_ok__"" style=""background:#0d6efd;color:#fff;border:none;padding:9px 24px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;margin-right:8px;"">Continue</button>'
+                        + '<button id=""__tb_skip__"" style=""background:#dc3545;color:#fff;border:none;padding:9px 24px;border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;"">Skip Posting</button>';
+                    ov.appendChild(box);
+                    document.body.appendChild(ov);
+                    document.getElementById('__tb_ok__').onclick   = () => { ov.remove(); resolve(false); };
+                    document.getElementById('__tb_skip__').onclick = () => { ov.remove(); resolve(true);  };
+                })", new { label = labelText, options = optList });
+                if (skipPosting) return $"unmapped_required_select: {labelText}";
             }
 
             logger?.Information("  Select {Key}: chose '{Chosen}'", key ?? "unknown", chosen);
