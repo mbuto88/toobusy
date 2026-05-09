@@ -23,12 +23,12 @@ public static class HumanizedInput
         new(StringComparer.OrdinalIgnoreCase)
         { "current_employer", "linkedin_url", "github_url", "portfolio_url", "desired_location" };
 
-    // Navigate to a field, alternating between Tab and mouse-click.
+    // Navigate to a field, alternating between Tab and focus.
     public static async Task NavigateToFieldAsync(IPage page, ILocator field, bool isFirstField, CancellationToken ct)
     {
-        if (isFirstField || Rng.NextDouble() < 0.4)
+        if (isFirstField)
         {
-            // Mouse-move + click (40% probability for non-first fields, always for first)
+            // First field: real click to establish initial page focus
             var box = await field.BoundingBoxAsync();
             if (box != null)
             {
@@ -36,10 +36,12 @@ public static class HumanizedInput
                 await Task.Delay(Rng.Next(80, 200), ct);
             }
             await field.ClickAsync();
+            return;
         }
-        else
+
+        if (Rng.NextDouble() < 0.6)
         {
-            // Tab navigation (60% probability)
+            // Tab navigation (60%) — browser scrolls only as needed, no viewport centering
             await page.Keyboard.PressAsync("Tab");
             await Task.Delay(Rng.Next(100, 400), ct);
 
@@ -51,6 +53,12 @@ public static class HumanizedInput
                 await page.Keyboard.PressAsync("Tab");
                 await Task.Delay(Rng.Next(100, 300), ct);
             }
+        }
+        else
+        {
+            // JS focus (40%) — targets the exact field without Playwright's scroll-to-center
+            await field.EvaluateAsync("el => el.focus()");
+            await Task.Delay(Rng.Next(80, 200), ct);
         }
     }
 
@@ -104,6 +112,24 @@ public static class HumanizedInput
             await field.PressAsync(value[i].ToString());
             await Task.Delay(Rng.Next(80, 250), ct);
         }
+    }
+
+    // After typing into a combobox (React Select etc.), commit the selection by pressing
+    // Enter if the dropdown has visible options — typing alone reverts on blur.
+    public static async Task CommitComboboxIfOpenAsync(IPage page, ILocator field, CancellationToken ct)
+    {
+        try
+        {
+            var role = await field.GetAttributeAsync("role");
+            if (!"combobox".Equals(role, StringComparison.OrdinalIgnoreCase)) return;
+            await Task.Delay(300, ct); // let dropdown filter/render
+            var hasOptions = await page.EvaluateAsync<bool>(
+                "() => document.querySelectorAll('[role=option]').length > 0");
+            if (!hasOptions) return;
+            await page.Keyboard.PressAsync("Enter");
+            await Task.Delay(150, ct);
+        }
+        catch { /* best effort */ }
     }
 
     // Random 200-800ms pause between form fields.

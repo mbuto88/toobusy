@@ -41,10 +41,11 @@ var companiesRepo = new CompaniesRepository(db);
 
 var formFieldDetector = new FormFieldDetector();
 var captchaWaiter = new CaptchaWaiter(config, logger);
+var llmFieldMapper = new LlmFieldMapper(profile, PathHelper.ConfigPath("config/field-mappings.json"), logger);
 
 var submitters = new List<IFormSubmitter>
 {
-    new GreenhouseSubmitter(formFieldDetector, captchaWaiter, logger),
+    new GreenhouseSubmitter(formFieldDetector, captchaWaiter, llmFieldMapper, logger),
 };
 
 var dailyLimit = new DailyLimitTracker(postingsRepo, config);

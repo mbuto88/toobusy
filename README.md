@@ -14,6 +14,11 @@ Automated job-application pipeline: discovers postings via ATS public APIs, fill
   cd src/JobSearch.Submitter
   pwsh playwright.ps1 install --with-deps chrome
   ```
+- [Ollama](https://ollama.com) installed and the model pulled (one-time):
+  ```powershell
+  ollama pull qwen2.5:3b-instruct-q4_K_M
+  ```
+  Ollama is used to fill unknown form fields. If it isn't running, the submitter falls back to the existing DOM modal for those fields — it is not required for the pipeline to function.
 
 ---
 
@@ -35,6 +40,17 @@ Runtime settings:
 | `CaptchaHandlingMode` | `wait_for_human` | `wait_for_human` or `skip_to_manual` |
 | `CaptchaTimeoutMinutes` | 10 | How long to wait for manual captcha solve |
 | `ExcludedCompanies` | `["accenture", ...]` | Companies to skip entirely |
+
+### `config/field-mappings.json`
+LLM answer cache. Created automatically on the first run that encounters an unmapped required field. Keys are field labels (lowercased), values are the answers. Human-editable — you can correct or pre-populate answers here. This file is gitignored.
+
+Example:
+```json
+{
+  "why are you interested in this role?": "I'm drawn to the intersection of platform engineering and developer tooling.",
+  "years of python experience": "3-5 years"
+}
+```
 
 ### `config/companies.json`
 ATS slugs per platform. Populated by the Seeder. Format:
@@ -141,6 +157,22 @@ data/
   dry-run-screenshot.png    # Latest dry-run result
   validation/               # Manual test notes
 ```
+
+---
+
+## LLM field mapping
+
+When the submitter encounters a required form field whose label doesn't match any known profile key (e.g. "Why are you interested in this role?", custom dropdowns), it uses a local Ollama LLM to generate an answer.
+
+**How it works:**
+1. Before filling the form, all unmapped required fields (text inputs and selects) are collected in one scan.
+2. A single batched prompt is sent to Ollama with all questions, the applicant's profile, and a resume excerpt (first 2000 chars of the PDF).
+3. Answers are stored in `config/field-mappings.json`. On subsequent runs, cached answers are used without any LLM call.
+4. If Ollama is unavailable after 5 retries, or if a question has no answer, the submitter falls through to the existing DOM modal for that field.
+
+**Select/dropdown fields:** The LLM picks one of the listed options. Matching is case-insensitive and falls back to substring matching in either direction.
+
+**Cache management:** Edit `config/field-mappings.json` directly to correct a bad answer or pre-populate answers for fields you know will appear. The file is sorted alphabetically on save.
 
 ---
 

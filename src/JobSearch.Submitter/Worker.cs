@@ -61,7 +61,7 @@ public class SubmitterWorker : BackgroundService
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                if (!_scheduler.IsWithinSubmissionWindow())
+                if (!_dryRun && !_scheduler.IsWithinSubmissionWindow())
                 {
                     var wait = _scheduler.TimeUntilWindowOpens();
                     _logger.Information("Outside submission window — sleeping {Minutes:F0} min until window opens",

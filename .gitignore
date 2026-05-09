@@ -14,11 +14,13 @@ obj/
 data/jobsearch.db
 data/jobsearch.db-wal
 data/jobsearch.db-shm
-data/failures/
-data/dry-run-screenshot.png
+data/**/*.png
 data/schema-samples/
 logs/
 reports/
+
+# LLM field answer cache — contains personal answers, not source
+config/field-mappings.json
 
 # Playwright browser profiles (contain session cookies — never commit)
 data/browser-profiles/

@@ -8,14 +8,16 @@ public class GreenhouseSubmitter : IFormSubmitter
 {
     private readonly FormFieldDetector _detector;
     private readonly CaptchaWaiter _captchaWaiter;
+    private readonly LlmFieldMapper _llmFieldMapper;
     private readonly ILogger _logger;
 
     public string AtsSource => Core.Models.AtsSource.Greenhouse;
 
-    public GreenhouseSubmitter(FormFieldDetector detector, CaptchaWaiter captchaWaiter, ILogger logger)
+    public GreenhouseSubmitter(FormFieldDetector detector, CaptchaWaiter captchaWaiter, LlmFieldMapper llmFieldMapper, ILogger logger)
     {
         _detector = detector;
         _captchaWaiter = captchaWaiter;
+        _llmFieldMapper = llmFieldMapper;
         _logger = logger;
     }
 
@@ -61,7 +63,7 @@ public class GreenhouseSubmitter : IFormSubmitter
             }
 
             // Fill form fields
-            var fillReason = await FillFormAsync(page, profile, _logger, ct);
+            var fillReason = await FillFormAsync(page, profile, _llmFieldMapper, _logger, ct);
             if (fillReason != null)
             {
                 _logger.Warning("{Company}/{Id}: {Reason} → needs_manual", posting.Company, posting.Id, fillReason);
@@ -168,7 +170,7 @@ public class GreenhouseSubmitter : IFormSubmitter
         }
     }
 
-    private static async Task<string?> FillFormAsync(IPage page, ProfileConfig profile, ILogger logger, CancellationToken ct)
+    private static async Task<string?> FillFormAsync(IPage page, ProfileConfig profile, LlmFieldMapper llmFieldMapper, ILogger logger, CancellationToken ct)
     {
         // Scope to the application form container only — never the job-alerts widget.
         //
@@ -204,6 +206,10 @@ public class GreenhouseSubmitter : IFormSubmitter
         }
         logger.Information("Form scope matched: {Selector}", matchedSelector);
 
+        // Pre-scan all unmapped required fields and ask the LLM for answers in one batch call.
+        // This avoids blocking the fill loop with repeated Ollama round-trips.
+        var llmAnswers = await ScanAndFetchLlmAnswersAsync(page, scope, profile, llmFieldMapper, ct, logger);
+
         // --- Text / email / tel / url / textarea inputs ---
         var inputs = scope.Locator(
             "input[type=text], input[type=email], input[type=tel], input[type=url], input:not([type]), textarea");
@@ -214,13 +220,22 @@ public class GreenhouseSubmitter : IFormSubmitter
         for (var i = 0; i < count; i++)
         {
             var field = inputs.Nth(i);
+
+            // React Select and other custom components inject a hidden backing input for
+            // form-required validation. Skip any element that has a *-hidden="true" attribute
+            // (aria-hidden being the most common) — clicking them causes 30s hangs.
+            if (await field.EvaluateAsync<bool>(
+                "el => Array.from(el.attributes).some(a => a.name.endsWith('-hidden') && a.value === 'true')"))
+                continue;
+
             var key = await FieldMapper.ResolveProfileKeyAsync(page, field);
             if (key == null || filledKeys.Contains(key))
             {
                 // For unresolved fields, only prompt if required and visible
                 if (key == null && await field.IsVisibleAsync() && await field.EvaluateAsync<bool>("el => el.required"))
                 {
-                    var label = await field.GetAttributeAsync("placeholder")
+                    var label = await FieldMapper.GetLabelTextAsync(page, field)
+                        ?? await field.GetAttributeAsync("placeholder")
                         ?? await field.GetAttributeAsync("name")
                         ?? await field.GetAttributeAsync("id")
                         ?? "unknown";
@@ -232,8 +247,21 @@ public class GreenhouseSubmitter : IFormSubmitter
                         continue;
                     }
 
-                    // Has a recognisable label but no profile mapping — show in-browser modal so
-                    // the user can fill it manually and continue, or choose to skip the posting.
+                    // Check LLM batch answers first (populated from pre-scan above).
+                    var normalizedLabel = label.Trim().ToLowerInvariant();
+                    if (llmAnswers.TryGetValue(normalizedLabel, out var llmAnswer))
+                    {
+                        logger.Information("  LLM-filled '{Label}' = '{Value}'", label, llmAnswer);
+                        await HumanizedInput.NavigateToFieldAsync(page, field, isFirst, ct);
+                        await field.ClearAsync();
+                        await HumanizedInput.TypeFieldAsync(field, llmAnswer, "llm_answer", ct);
+                        await HumanizedInput.DelayBetweenFieldsAsync(ct);
+                        isFirst = false;
+                        continue;
+                    }
+
+                    // LLM had no answer — show in-browser modal so the user can fill it manually
+                    // and continue, or choose to skip the posting.
                     logger.Warning("  Unmapped required field: {Label} — showing browser prompt", label);
                     await page.BringToFrontAsync();
                     var skipPosting = await page.EvaluateAsync<bool>(@"(label) => new Promise(resolve => {
@@ -316,7 +344,7 @@ public class GreenhouseSubmitter : IFormSubmitter
         }
 
         // --- Select / dropdown fields ---
-        var selectReason = await FillSelectsAsync(page, scope, profile, ct, logger);
+        var selectReason = await FillSelectsAsync(page, scope, profile, llmAnswers, ct, logger);
         if (selectReason != null) return selectReason;
 
         // --- Resume upload (required file input) ---
@@ -336,9 +364,74 @@ public class GreenhouseSubmitter : IFormSubmitter
         return null;
     }
 
+    // Pre-scans the form for unmapped required fields (text + select) and asks the
+    // LLM for answers in one batch call. Returns a normalized-label → answer dict.
+    private static async Task<Dictionary<string, string>> ScanAndFetchLlmAnswersAsync(
+        IPage page, ILocator scope, ProfileConfig profile, LlmFieldMapper llmFieldMapper, CancellationToken ct, ILogger logger)
+    {
+        var questions  = new List<FieldQuestion>();
+        var seenLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Text / url / tel / email / textarea
+        var inputs = scope.Locator(
+            "input[type=text], input[type=email], input[type=tel], input[type=url], input:not([type]), textarea");
+        var inputCount = await inputs.CountAsync();
+        for (var i = 0; i < inputCount; i++)
+        {
+            try
+            {
+                var field = inputs.Nth(i);
+                if (!await field.IsVisibleAsync()) continue;
+                if (await field.EvaluateAsync<bool>(
+                    "el => Array.from(el.attributes).some(a => a.name.endsWith('-hidden') && a.value === 'true')")) continue;
+                if (!await field.EvaluateAsync<bool>("el => el.required")) continue;
+                if (await FieldMapper.ResolveProfileKeyAsync(page, field) != null) continue;
+                var label = await FieldMapper.GetLabelTextAsync(page, field)
+                         ?? await field.GetAttributeAsync("placeholder")
+                         ?? await field.GetAttributeAsync("name")
+                         ?? await field.GetAttributeAsync("id");
+                if (string.IsNullOrWhiteSpace(label) || label.Equals("unknown", StringComparison.OrdinalIgnoreCase)) continue;
+                if (IsGenericDropdownText(label)) continue;
+                if (seenLabels.Add(label.Trim().ToLowerInvariant()))
+                    questions.Add(new FieldQuestion(label.Trim()));
+            }
+            catch { /* element may have changed — skip */ }
+        }
+
+        // Selects
+        var selects = scope.Locator("select");
+        var selCount = await selects.CountAsync();
+        for (var i = 0; i < selCount; i++)
+        {
+            try
+            {
+                var sel = selects.Nth(i);
+                if (!await sel.EvaluateAsync<bool>("el => el.required")) continue;
+                var options = await sel.EvaluateAsync<string[]>(
+                    "el => Array.from(el.options).filter(o => o.value !== '').map(o => o.text.trim())");
+                if (options.Length == 0) continue;
+                var key          = await FieldMapper.ResolveProfileKeyAsync(page, sel);
+                var profileValue = key != null ? FieldMapper.GetValue(profile, key) : null;
+                if (PickSelectOption(key, profileValue, options) != null) continue; // handled without LLM
+                var label = await FieldMapper.GetLabelTextAsync(page, sel) ?? key;
+                if (string.IsNullOrWhiteSpace(label) || label.Equals("unknown", StringComparison.OrdinalIgnoreCase)) continue;
+                if (IsGenericDropdownText(label)) continue;
+                if (seenLabels.Add(label.Trim().ToLowerInvariant()))
+                    questions.Add(new FieldQuestion(label.Trim(), options));
+            }
+            catch { /* element may have changed — skip */ }
+        }
+
+        if (questions.Count == 0)
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        logger.Information("LLM: found {Count} unmapped required field(s) — querying", questions.Count);
+        return await llmFieldMapper.GetAnswersAsync(questions, ct);
+    }
+
     // Fills all <select> dropdown fields within the scoped form container.
     // Uses JS dispatch to handle selectize-hidden native <select> elements.
-    private static async Task<string?> FillSelectsAsync(IPage page, ILocator scope, ProfileConfig profile, CancellationToken ct, ILogger? logger = null)
+    private static async Task<string?> FillSelectsAsync(IPage page, ILocator scope, ProfileConfig profile, IReadOnlyDictionary<string, string> llmAnswers, CancellationToken ct, ILogger? logger = null)
     {
         var selects = scope.Locator("select");
         var count = await selects.CountAsync();
@@ -372,7 +465,24 @@ public class GreenhouseSubmitter : IFormSubmitter
                 }
 
                 var labelText = await FieldMapper.GetLabelTextAsync(page, sel) ?? key ?? "unknown_select";
-                var optList = string.Join(", ", options);
+                var optList   = string.Join(", ", options);
+
+                // Try LLM answer first — match it against available options.
+                var normalizedLabel = labelText.Trim().ToLowerInvariant();
+                if (llmAnswers.TryGetValue(normalizedLabel, out var llmAnswer))
+                {
+                    var llmMatch = options.FirstOrDefault(o => o.Equals(llmAnswer, StringComparison.OrdinalIgnoreCase))
+                                ?? options.FirstOrDefault(o => o.Contains(llmAnswer, StringComparison.OrdinalIgnoreCase))
+                                ?? options.FirstOrDefault(o => llmAnswer.Contains(o, StringComparison.OrdinalIgnoreCase));
+                    if (llmMatch != null)
+                    {
+                        chosen = llmMatch;
+                        logger?.Information("  LLM-select '{Label}': chose '{Chosen}'", labelText, chosen);
+                    }
+                }
+
+                if (chosen == null)
+                {
                 logger?.Warning("  Unmapped required dropdown '{Label}' options=[{Options}] — showing browser prompt", labelText, optList);
                 await page.BringToFrontAsync();
                 var skipPosting = await page.EvaluateAsync<bool>(@"(args) => new Promise(resolve => {
@@ -393,7 +503,8 @@ public class GreenhouseSubmitter : IFormSubmitter
                     document.getElementById('__tb_skip__').onclick = () => { ov.remove(); resolve(true);  };
                 })", new { label = labelText, options = optList });
                 if (skipPosting) return $"unmapped_required_select: {labelText}";
-            }
+                }  // end if (chosen == null) after LLM check
+            }  // end outer if (chosen == null)
 
             logger?.Information("  Select {Key}: chose '{Chosen}'", key ?? "unknown", chosen);
 
@@ -411,6 +522,15 @@ public class GreenhouseSubmitter : IFormSubmitter
         }
 
         return null;
+    }
+
+    // Returns true for React Select UI text that looks like a placeholder rather than a real label.
+    private static bool IsGenericDropdownText(string label)
+    {
+        var t = label.Trim();
+        return t.StartsWith("Select", StringComparison.OrdinalIgnoreCase) ||
+               t.Equals("No options", StringComparison.OrdinalIgnoreCase) ||
+               t.Equals("Loading...", StringComparison.OrdinalIgnoreCase);
     }
 
     // Picks the best matching option text from a <select>'s available options.
